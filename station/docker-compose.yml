@@ -1,0 +1,250 @@
+services:
+  mosquitto:
+    image: eclipse-mosquitto:2
+    container_name: primecare-mosquitto
+    restart: unless-stopped
+    ports:
+      - "1883:1883"
+    volumes:
+      - ./mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      - mosquitto-data:/mosquitto/data
+      - mosquitto-logs:/mosquitto/log
+    healthcheck:
+      test: ["CMD", "mosquitto_sub", "-h", "localhost", "-t", "$$SYS/#", "-C", "1", "-i", "healthcheck", "-W", "3"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  sensor-service:
+    build: ./sensor-service
+    container_name: primecare-sensor
+    restart: unless-stopped
+    ports:
+      - "3004:3004"
+    volumes:
+      - primecare-data:/data
+    environment:
+      - MQTT_BROKER=mosquitto
+      - DB_PATH=/data/primecare.db
+    depends_on:
+      mosquitto:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:3004/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  patient-service:
+    build: ./patient-service
+    container_name: primecare-patient
+    restart: unless-stopped
+    ports:
+      - "3001:3001"
+    volumes:
+      - primecare-data:/data
+    environment:
+      - DB_PATH=/data/primecare.db
+      - PORT=3001
+    depends_on:
+      sensor-service:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-O-", "http://127.0.0.1:3001/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  llm-service:
+    build: ./llm-service
+    container_name: primecare-llm
+    restart: unless-stopped
+    ports:
+      - "3005:3005"
+    environment:
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
+      - OPENROUTER_PRIMARY=${OPENROUTER_PRIMARY}
+      - OPENROUTER_FALLBACK=${OPENROUTER_FALLBACK}
+    depends_on:
+      mosquitto:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:3005/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  session-service:
+    build: ./session-service
+    container_name: primecare-session
+    restart: unless-stopped
+    ports:
+      - "3002:3002"
+    volumes:
+      - primecare-data:/data
+    environment:
+      - DB_PATH=/data/primecare.db
+      - PORT=3002
+      - MQTT_BROKER=mosquitto
+      - LLM_SERVICE_URL=http://llm-service:3005
+      - PATIENT_SERVICE_URL=http://patient-service:3001
+      - CLOUD_API_URL=${CLOUD_API_URL}
+    depends_on:
+      mosquitto:
+        condition: service_healthy
+      sensor-service:
+        condition: service_healthy
+      patient-service:
+        condition: service_healthy
+      llm-service:
+        condition: service_healthy
+
+  watchdog-service:
+    build: ./watchdog-service
+    container_name: primecare-watchdog
+    restart: unless-stopped
+    ports:
+      - "3006:3006"
+    volumes:
+      - primecare-data:/data
+    environment:
+      - MQTT_BROKER=mosquitto
+      - DB_PATH=/data/primecare.db
+    depends_on:
+      mosquitto:
+        condition: service_healthy
+
+  gateway:
+    build: ./gateway
+    container_name: primecare-gateway
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      - PORT=8080
+      - MQTT_BROKER=mosquitto
+      - PATIENT_SERVICE=http://patient-service:3001
+      - SESSION_SERVICE=http://session-service:3002
+      - SENSOR_SERVICE=http://sensor-service:3004
+      - LLM_SERVICE=http://llm-service:3005
+      - WATCHDOG_SERVICE=http://watchdog-service:3006
+      - PRINTER_SERVICE=http://printer-service:8004
+      - OCR_SERVICE=http://ocr-service:8002
+      - CLOUD_API_URL=${CLOUD_API_URL}
+    depends_on:
+      mosquitto:
+        condition: service_healthy
+      sensor-service:
+        condition: service_healthy
+      patient-service:
+        condition: service_healthy
+      session-service:
+        condition: service_healthy
+
+  sync-service:
+    build: ./sync-service
+    container_name: primecare-sync
+    restart: unless-stopped
+    volumes:
+      - primecare-data:/data
+    environment:
+      - DB_PATH=/data/primecare.db
+      - MONGO_URI=${MONGO_URI}
+      - SYNC_INTERVAL=300000
+    depends_on:
+      sensor-service:
+        condition: service_healthy
+
+  printer-service:
+    build: ./printer-service
+    container_name: primecare-printer
+    restart: unless-stopped
+    privileged: true
+    ports:
+      - "8004:8004"
+    volumes:
+      - primecare-data:/data
+    environment:
+      - DB_PATH=/data/primecare.db
+      - PRINTER_VENDOR_ID=${PRINTER_VENDOR_ID}
+      - PRINTER_PRODUCT_ID=${PRINTER_PRODUCT_ID}
+      - SIMULATION_MODE=false
+    devices:
+      - "/dev/bus/usb:/dev/bus/usb"
+    depends_on:
+      sensor-service:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:8004/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  eye-service:
+    build: ./eye-service
+    container_name: primecare-eye
+    restart: unless-stopped
+    ports:
+      - "8001:8001"
+    devices:
+      - "/dev/video0:/dev/video0"
+    depends_on:
+      mosquitto:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:8001/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+  ocr-service:
+    build: ./ocr-service
+    container_name: primecare-ocr
+    restart: unless-stopped
+    ports:
+      - "8002:8002"
+    environment:
+      - CAMERA_RTSP_URL=${CAMERA_RTSP_URL}
+      - BP_CROP_X=170
+      - BP_CROP_Y=50
+      - BP_CROP_W=250
+      - BP_CROP_H=270
+    depends_on:
+      mosquitto:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:8002/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  kiosk:
+    build:
+      context: ./kiosk-ui
+      dockerfile: Dockerfile
+    container_name: primecare-kiosk
+    ports:
+      - "80:80"
+      - "443:443"
+    restart: unless-stopped
+    depends_on:
+      - gateway
+
+volumes:
+  primecare-data:
+    driver: local
+  mosquitto-data:
+    driver: local
+  mosquitto-logs:
+    driver: local
+
+networks:
+  default:
+    name: primecare-net

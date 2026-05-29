@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="hi">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Eye Test</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #0a0f1e; color: white; font-family: sans-serif; display: flex; align-items: center; justify-content: center; height: 100vh; }
+#app { width: 100%; max-width: 600px; padding: 20px; }
+#preview-container { position: relative; width: 100%; aspect-ratio: 4/3; background: #111; border-radius: 16px; overflow: hidden; margin: 16px 0; display: flex; align-items: center; justify-content: center; }
+#preview-img { width: 100%; height: 100%; object-fit: cover; display: none; }
+#guide-ring { position: absolute; width: 120px; height: 80px; border-radius: 50%; border: 3px solid #ef4444; transition: border-color 0.3s, box-shadow 0.3s; pointer-events: none; }
+#guide-ring.good { border-color: #22c55e; box-shadow: 0 0 20px #22c55e; }
+#status-text { text-align: center; font-size: 18px; padding: 8px; min-height: 32px; }
+#result-box { display: none; text-align: center; padding: 20px; border-radius: 16px; background: #1a2a1a; margin-top: 16px; }
+#ws-indicator { font-size: 12px; color: #666; text-align: center; margin-bottom: 8px; }
+#placeholder-text { color: #444; font-size: 14px; text-align: center; }
+</style>
+</head>
+<body>
+<div id="app">
+  <h2 style="text-align:center; margin-bottom:8px;">👁️ Eye Screen Test</h2>
+  <div id="ws-indicator">WebSocket: connecting...</div>
+  <div id="preview-container">
+    <img id="preview-img" alt="camera preview" />
+    <div id="guide-ring"></div>
+    <p id="placeholder-text">Waiting for iPhone camera...</p>
+  </div>
+  <div id="status-text" style="color:#f59e0b;">Waiting for eye-capture page on iPhone</div>
+  <div id="result-box">
+    <div id="result-label" style="font-size:32px; font-weight:bold;"></div>
+    <div id="result-conf" style="color:#aaa; margin-top:8px;"></div>
+  </div>
+</div>
+
+<script>
+const WS_URL = "wss://" + location.hostname + "/ws";
+const statusEl = document.getElementById("status-text");
+const guideRing = document.getElementById("guide-ring");
+const previewImg = document.getElementById("preview-img");
+const placeholderText = document.getElementById("placeholder-text");
+const resultBox = document.getElementById("result-box");
+const wsIndicator = document.getElementById("ws-indicator");
+
+let ws;
+
+function connect() {
+  ws = new WebSocket(WS_URL);
+  ws.onopen = () => {
+    wsIndicator.textContent = "WebSocket: connected";
+    wsIndicator.style.color = "#22c55e";
+    // Trigger eye start
+    ws.send(JSON.stringify({ type: "eye_start" }));
+    statusEl.textContent = "Sent eye_start — open eye-capture.html on iPhone";
+    statusEl.style.color = "#f59e0b";
+  };
+  ws.onclose = () => {
+    wsIndicator.textContent = "WebSocket: reconnecting...";
+    wsIndicator.style.color = "#ef4444";
+    setTimeout(connect, 3000);
+  };
+  ws.onmessage = (e) => {
+    try {
+      const msg = JSON.parse(e.data);
+
+      if (msg.type === "eye_preview" && msg.data) {
+        previewImg.src = msg.data;
+        previewImg.style.display = "block";
+        placeholderText.style.display = "none";
+      }
+
+      if (msg.type === "eye_quality") {
+        if (msg.showManual) {
+          statusEl.textContent = "Max attempts — manual button on iPhone";
+          statusEl.style.color = "#ef4444";
+        } else if (msg.good) {
+          guideRing.className = "good";
+          statusEl.textContent = "Good position — capturing...";
+          statusEl.style.color = "#22c55e";
+        } else {
+          guideRing.className = "";
+          statusEl.textContent = msg.reason || "Adjust position";
+          statusEl.style.color = "#f59e0b";
+        }
+      }
+
+      if (msg.type === "eye_result" && msg.result) {
+        const labels = { normal: "Normal", cataract: "Cataract", glaucoma: "Glaucoma", diabetic_retinopathy: "Diabetic Retinopathy" };
+        const colors = { normal: "#22c55e", cataract: "#f59e0b", glaucoma: "#f59e0b", diabetic_retinopathy: "#ef4444" };
+        resultBox.style.display = "block";
+        document.getElementById("result-label").textContent = labels[msg.result.class] || msg.result.class;
+        document.getElementById("result-label").style.color = colors[msg.result.class] || "#fff";
+        document.getElementById("result-conf").textContent = Math.round(msg.result.confidence * 100) + "% confidence";
+        statusEl.textContent = "Done!";
+        statusEl.style.color = "#22c55e";
+      }
+    } catch(err) {}
+  };
+}
+
+connect();
+</script>
+</body>
+</html>

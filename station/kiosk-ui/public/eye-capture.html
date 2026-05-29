@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="hi">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-fullscreen">
+<title>GramAI Eye Camera</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #000; color: #fff; font-family: sans-serif; overflow: hidden; height: 100vh; width: 100vw; }
+#video { position: fixed; top: 0; left: 0; width: 100%; height: 100%; object-fit: cover; }
+#overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; pointer-events: none; }
+#guide-ring { width: 200px; height: 200px; border-radius: 50%; border: 4px solid rgba(255,255,255,0.3); transition: border-color 0.3s; }
+#guide-ring.good { border-color: #22c55e; box-shadow: 0 0 20px #22c55e; }
+#guide-ring.bad { border-color: #ef4444; }
+#status { margin-top: 20px; font-size: 18px; font-weight: bold; text-align: center; padding: 8px 20px; border-radius: 20px; background: rgba(0,0,0,0.6); }
+#attempts { position: fixed; top: 20px; right: 20px; font-size: 14px; background: rgba(0,0,0,0.6); padding: 6px 12px; border-radius: 10px; }
+#manual-btn { position: fixed; bottom: 60px; left: 50%; transform: translateX(-50%); padding: 16px 40px; background: #2563eb; border: none; border-radius: 20px; color: white; font-size: 20px; font-weight: bold; display: none; pointer-events: all; cursor: pointer; }
+#result-overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.85); display: none; flex-direction: column; align-items: center; justify-content: center; gap: 20px; }
+#result-text { font-size: 36px; font-weight: bold; }
+#ws-status { position: fixed; top: 20px; left: 20px; font-size: 12px; padding: 4px 10px; border-radius: 8px; background: rgba(0,0,0,0.6); }
+canvas { display: none; }
+</style>
+</head>
+<body>
+<video id="video" autoplay playsinline muted></video>
+<canvas id="canvas"></canvas>
+<div id="overlay">
+  <div id="guide-ring"></div>
+  <div id="status">Camera starting...</div>
+</div>
+<div id="attempts"></div>
+<div id="ws-status">Connecting...</div>
+<button id="manual-btn" onclick="manualCapture()">Take Photo Now</button>
+<div id="result-overlay">
+  <div id="result-text"></div>
+  <div id="result-sub" style="font-size:18px;color:#aaa"></div>
+</div>
+<script>
+const WS_URL = "wss://" + location.hostname + "/ws?type=eye-camera";
+const API_URL = "https://" + location.hostname + "/api/eye/classify";
+
+let ws = null;
+let stream = null;
+let analyzing = false;
+let goodFrames = 0;
+let attempts = 0;
+const MAX_ATTEMPTS = 3;
+let captureEnabled = false;
+let analysisInterval = null;
+let lastPreviewTime = 0;
+
+const video = document.getElementById("video");
+const canvas = document.getElementById("canvas");
+const ctx = canvas.getContext("2d");
+const guideRing = document.getElementById("guide-ring");
+const statusEl = document.getElementById("status");
+const attemptsEl = document.getElementById("attempts");
+const manualBtn = document.getElementById("manual-btn");
+const resultOverlay = document.getElementById("result-overlay");
+const wsStatus = document.getElementById("ws-status");
+
+function connectWS() {
+  ws = new WebSocket(WS_URL);
+  ws.onopen = () => { wsStatus.textContent = "Connected"; wsStatus.style.color = "#22c55e"; };
+  ws.onclose = () => { wsStatus.textContent = "Disconnected"; setTimeout(connectWS, 3000); };
+  ws.onmessage = (e) => {
+    try {
+      const msg = JSON.parse(e.data);
+      if (msg.type === "eye_start") startCapture();
+      else if (msg.type === "eye_cancel") stopCapture();
+    } catch(err) {}
+  };
+}
+
+async function startCamera() {
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: { ideal: "environment" }, width: { ideal: 1280 }, height: { ideal: 720 } },
+      audio: false
+    });
+    video.srcObject = stream;
+    await video.play();
+    statusEl.textContent = "Place eye in circle";
+    captureEnabled = true;
+    analysisInterval = setInterval(analyzeFrame, 500);
+  } catch(e) {
+    statusEl.textContent = "Camera error: " + e.message;
+  }
+}
+
+function startCapture() {
+  attempts = 0; goodFrames = 0; captureEnabled = true;
+  manualBtn.style.display = "none";
+  resultOverlay.style.display = "none";
+  updateAttempts();
+}
+
+function stopCapture() { captureEnabled = false; goodFrames = 0; }
+
+function analyzeFrame() {
+  if (!captureEnabled || analyzing) return;
+  analyzing = true;
+  try {
+    canvas.width = video.videoWidth || 640;
+    canvas.height = video.videoHeight || 480;
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+    const quality = checkQuality();
+    const now = Date.now();
+    if (now - lastPreviewTime > 2000) {
+      lastPreviewTime = now;
+      sendWS({ type: "eye_preview", data: canvas.toDataURL("image/jpeg", 0.25) });
+    }
+    sendWS({ type: "eye_quality", good: quality.good, reason: quality.reason });
+    if (quality.good) {
+      guideRing.className = "good";
+      statusEl.textContent = "Hold still...";
+      goodFrames++;
+      if (goodFrames >= 2) { goodFrames = 0; captureEnabled = false; doCapture(); }
+    } else {
+      guideRing.className = "bad";
+      statusEl.textContent = quality.reason;
+      goodFrames = 0;
+    }
+  } catch(e) {}
+  analyzing = false;
+}
+
+function checkQuality() {
+  const w = canvas.width, h = canvas.height;
+  const cx = Math.floor(w*0.3), cy = Math.floor(h*0.3);
+  const cw = Math.floor(w*0.4), ch = Math.floor(h*0.4);
+  const pixels = ctx.getImageData(cx, cy, cw, ch).data;
+  let totalBrightness = 0;
+  for (let i = 0; i < pixels.length; i += 4)
+    totalBrightness += (pixels[i] + pixels[i+1] + pixels[i+2]) / 3;
+  const avgBrightness = totalBrightness / (pixels.length / 4);
+  if (avgBrightness < 30) return { good: false, reason: "Low light - turn on LED" };
+  if (avgBrightness > 230) return { good: false, reason: "Too bright" };
+  let mean = 0; const gray = [];
+  for (let i = 0; i < pixels.length; i += 4) {
+    const g = 0.299*pixels[i] + 0.587*pixels[i+1] + 0.114*pixels[i+2];
+    gray.push(g); mean += g;
+  }
+  mean /= gray.length;
+  let variance = 0;
+  for (const g of gray) variance += (g - mean) ** 2;
+  variance /= gray.length;
+  if (variance < 40) return { good: false, reason: "Too blurry - move closer" };
+  let minV = 255, maxV = 0;
+  for (const g of gray) { if (g < minV) minV = g; if (g > maxV) maxV = g; }
+  if (maxV - minV < 25) return { good: false, reason: "Position eye in circle" };
+  return { good: true, reason: "Good!" };
+}
+
+async function doCapture() {
+  attempts++; updateAttempts();
+  statusEl.textContent = "Capturing...";
+  guideRing.className = "";
+  ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+  canvas.toBlob(async (blob) => {
+    try {
+      const formData = new FormData();
+      formData.append("file", blob, "eye.jpg");
+      const res = await fetch(API_URL, { method: "POST", body: formData });
+      if (!res.ok) throw new Error("API error");
+      const data = await res.json();
+      const confidence = data.confidence > 1 ? data.confidence / 100 : data.confidence;
+      const result = { class: data.class, confidence };
+      sendWS({ type: "eye_result", result, attempts });
+      showResult(result);
+    } catch(e) {
+      if (attempts < MAX_ATTEMPTS) {
+        setTimeout(() => { captureEnabled = true; goodFrames = 0; statusEl.textContent = "Try again - place eye in circle"; }, 3000);
+      } else {
+        statusEl.textContent = "Press manual button";
+        manualBtn.style.display = "block";
+        sendWS({ type: "eye_quality", good: false, reason: "max_attempts", showManual: true });
+      }
+    }
+  }, "image/jpeg", 0.92);
+}
+
+function manualCapture() { captureEnabled = false; manualBtn.style.display = "none"; doCapture(); }
+
+function showResult(result) {
+  const labels = { normal: "Normal", cataract: "Cataract", glaucoma: "Glaucoma", diabetic_retinopathy: "Diabetic Retinopathy" };
+  const colors = { normal: "#22c55e", cataract: "#f59e0b", glaucoma: "#f59e0b", diabetic_retinopathy: "#ef4444" };
+  document.getElementById("result-text").textContent = labels[result.class] || result.class;
+  document.getElementById("result-text").style.color = colors[result.class] || "#fff";
+  document.getElementById("result-sub").textContent = Math.round(result.confidence * 100) + "% confidence";
+  resultOverlay.style.display = "flex";
+  setTimeout(() => { resultOverlay.style.display = "none"; captureEnabled = false; }, 4000);
+}
+
+function sendWS(msg) { if (ws && ws.readyState === 1) ws.send(JSON.stringify(msg)); }
+function updateAttempts() { attemptsEl.textContent = attempts > 0 ? "Attempt: " + attempts + "/" + MAX_ATTEMPTS : ""; }
+
+connectWS();
+startCamera();
+</script>
+</body>
+</html>

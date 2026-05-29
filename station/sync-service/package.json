@@ -1,0 +1,13 @@
+{
+  "name": "sync-service",
+  "version": "1.0.0",
+  "description": "GramAI SQLite to MongoDB Sync Service",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "better-sqlite3": "^9.4.3",
+    "mongodb": "^6.5.0"
+  }
+}
